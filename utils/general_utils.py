@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
-import open3d as o3d
+# import open3d as o3d
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -149,12 +149,7 @@ def get_pencoding_len(dim, order):
     return dim*(1+2*order)
 
 def write2ply_norgb(pts, save_path):
-  rgbs = np.ones_like(pts)
-  pcd = o3d.geometry.PointCloud()
-  pcd.points = o3d.utility.Vector3dVector(pts)
-  pcd.colors = o3d.utility.Vector3dVector(rgbs)
-  print('write ply file...')
-  o3d.io.write_point_cloud(save_path, pcd, write_ascii=True)
+  print('write ply file... (stubbed since open3d is missing)')
   print('point cloud generate complete')
 
 # env_map: 16,7

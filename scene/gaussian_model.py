@@ -69,7 +69,24 @@ class GaussianModel:
         self.init_refl_value = 1e-3
 
         self.env_map = None
+        self.cluster_labels = None
         self.setup_functions()
+
+    @property
+    def get_cluster_colors(self):
+        if self.cluster_labels is None:
+            return torch.zeros((self.get_xyz.shape[0], 3), device="cuda")
+        
+        # Generate stable random colors based on labels
+        unique_labels = torch.unique(self.cluster_labels)
+        colors = torch.rand((unique_labels.max() + 2, 3), device="cuda")
+        colors[-1] = torch.tensor([0.2, 0.2, 0.2], device="cuda") # -1 is grey
+        
+        return colors[self.cluster_labels]
+
+    def load_clusters(self, npy_path):
+        labels = np.load(npy_path)
+        self.cluster_labels = torch.from_numpy(labels).to("cuda").long()
 
     def capture(self):
         return (
@@ -433,7 +450,7 @@ class GaussianModel:
 
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
+        self.max_sh_degree = int(np.sqrt(len(extra_f_names) / 3 + 1) - 1)
         features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
         for idx, attr_name in enumerate(extra_f_names):
             features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])

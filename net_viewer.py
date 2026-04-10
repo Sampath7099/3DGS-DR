@@ -29,6 +29,11 @@ def render_network(dataset : ModelParams, iteration : int, pipeline : PipelinePa
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        
+        labels_path = os.path.join(dataset.model_path, "clusters", f"labels_{scene.loaded_iter}.npy")
+        if os.path.exists(labels_path):
+            print(f"Loading clusters from {labels_path}")
+            gaussians.load_clusters(labels_path)
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -41,8 +46,14 @@ def render_network(dataset : ModelParams, iteration : int, pipeline : PipelinePa
         radius = np.linalg.norm(max_pos - min_pos)
 
         test_views = scene.getTestCameras()
-        HWK = test_views[0].HWK
-        fovX, fovY = test_views[0].FoVx, test_views[0].FoVy
+        if len(test_views) > 0:
+            views = test_views
+        else:
+            views = scene.getTrainCameras()
+
+        assert len(views) > 0, "No cameras found in the scene!"
+        HWK = views[0].HWK
+        fovX, fovY = views[0].FoVx, views[0].FoVy
         
         while net.conn is None:
           print('wait for client...')
@@ -74,6 +85,11 @@ def render_network(dataset : ModelParams, iteration : int, pipeline : PipelinePa
                     image = res["refl_color_map"]
                 elif pst_mode == 4:  
                     image = res["normal_map"]*0.5+0.5
+                elif pst_mode == 5:
+                    if "cluster_map" in res:
+                        image = res["cluster_map"]
+                    else:
+                        image = torch.zeros_like(res["render"])
                 net.send(torch.clamp(image, min=0, max=1.0).permute(1, 2, 0).flatten().contiguous().cpu().numpy().astype('float32').tobytes())
             except :
                 break

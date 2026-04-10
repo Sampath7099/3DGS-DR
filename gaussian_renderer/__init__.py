@@ -149,5 +149,18 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         "visibility_filter" : _radii > 0,
         "radii": _radii
     }
+
+    if pc.cluster_labels is not None:
+        cluster_color, _ = rasterizer_c3(
+            means3D = means3D,
+            means2D = means2D,
+            shs = None,
+            colors_precomp = pc.get_cluster_colors,
+            opacities = opacities,
+            scales = scales,
+            rotations = rotations,
+            cov3D_precomp = None,
+            bg_map = bg_map_const)
+        results["cluster_map"] = cluster_color
         
     return results

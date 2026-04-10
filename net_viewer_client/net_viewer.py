@@ -98,13 +98,14 @@ class GUI:
             elif app_data == 'base_col': self.img_mode = 2
             elif app_data == 'refl_col': self.img_mode = 3
             elif app_data == 'normal': self.img_mode = 4
+            elif app_data == 'cluster': self.img_mode = 5
             print('Change presentation mode: {}'.format(app_data))
 
         ## control window ##
         with dpg.window(label="Control", tag="_control_window", width=200, height=150):
             dpg.add_separator()
             dpg.add_text('no data', tag="_log_time")
-            dpg.add_radio_button(label = 'mode', items=['color', 'strength', 'base_col', 'refl_col', 'normal'], callback=callback_mode_select)
+            dpg.add_radio_button(label = 'mode', items=['color', 'strength', 'base_col', 'refl_col', 'normal', 'cluster'], callback=callback_mode_select)
 
         ## register camera handler ##
         def callback_camera_drag_rotate(sender, app_data):
