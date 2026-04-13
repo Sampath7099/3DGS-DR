@@ -32,15 +32,41 @@ def sample_cubemap_color(rays_d, env_map):
     outcolor = outcolor.reshape(H,W,3).permute(2,0,1)
     return outcolor
 
-def get_refl_color(envmap: torch.Tensor, HWK, R, T, normal_map): #RT W2C
+def get_refl_color(envmap, HWK, R, T, normal_map): #RT W2C
     rays_d = sample_camera_rays(HWK, R, T)
     rays_d = reflection(rays_d, normal_map)
     #rays_d = rays_d.clamp(-1, 1) # avoid numerical error when arccos
     return sample_cubemap_color(rays_d, envmap)
 
+def get_refl_color_local(env_maps, cluster_id_map, HWK, R, T, normal_map):
+    """Compute reflection color by sampling the assigned local map for each pixel."""
+    rays_d = sample_camera_rays(HWK, R, T)
+    rays_d = reflection(rays_d, normal_map)
+    H, W = cluster_id_map.shape
+    
+    rays_flat = rays_d.reshape(-1, 3)
+    final_colors = torch.zeros_like(rays_flat)
+    
+    for cid in torch.unique(cluster_id_map):
+        cid_int = cid.item()
+        if cid_int < 0 or cid_int >= len(env_maps):
+            continue
+        mask = (cluster_id_map == cid).flatten()
+        if not mask.any(): continue
+        
+        # Sample the local map directly (no residual addition, no 0.01 dampening)
+        local_logits = env_maps[cid_int](rays_flat[mask])
+        final_colors[mask] = torch.sigmoid(local_logits)
+        
+    return final_colors.reshape(H,W,3).permute(2,0,1)
+
 def render_env_map(pc: GaussianModel):
-    env_cood1 = sample_cubemap_color(get_env_rayd1(512,1024), pc.get_envmap)
-    env_cood2 = sample_cubemap_color(get_env_rayd2(512,1024), pc.get_envmap)
+    env_maps = pc.get_envmap
+    if env_maps is None or len(env_maps) == 0:
+        return {}
+    # Show first env map as representative
+    env_cood1 = sample_cubemap_color(get_env_rayd1(512,1024), env_maps[0])
+    env_cood2 = sample_cubemap_color(get_env_rayd2(512,1024), env_maps[0])
     return {'env_cood1': env_cood1, 'env_cood2': env_cood2}
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, initial_stage = False, more_debug_infos = False):
@@ -135,7 +161,37 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     normal_map = normal_map.permute(1,2,0)
     normal_map = normal_map / (torch.norm(normal_map, dim=-1, keepdim=True)+1e-6)
-    refl_color = get_refl_color(pc.get_envmap, viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map)
+
+    # Per-cluster env map rendering
+    env_maps = pc.get_envmap
+    if env_maps is not None and pc.cluster_labels is not None and len(env_maps) > 1:
+        k = pc.num_env_clusters
+        
+        # Rasterize 3D positions to find exact intersection instead of hallucinating blended IDs
+        pos_map_raw, _ = rasterizer_c3(
+            means3D = means3D,
+            means2D = means2D,
+            shs = None,
+            colors_precomp = means3D,
+            opacities = opacities,
+            scales = scales,
+            rotations = rotations,
+            cov3D_precomp = None,
+            bg_map = torch.zeros(3, imH, imW, device='cuda'))
+            
+        # Calculate distance to physical cluster centers
+        cluster_centers = torch.stack([means3D[pc.cluster_labels == i].mean(0) for i in range(k)]) # [12, 3]
+        pos_flat = pos_map_raw.reshape(3, -1).permute(1, 0) # [HW, 3]
+        dists = torch.cdist(pos_flat.unsqueeze(0), cluster_centers.unsqueeze(0))[0] # [HW, 12]
+        
+        # Pick mathematically closest physical cluster center (impossible to hallucinate)
+        cluster_id_map = dists.argmin(dim=1).reshape(imH, imW)
+        
+        refl_color = get_refl_color_local(env_maps, cluster_id_map, viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map)
+    elif env_maps is not None and len(env_maps) == 1:
+        refl_color = get_refl_color(env_maps[0], viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map)
+    else:
+        refl_color = torch.zeros(3, imH, imW, device='cuda')
     
     final_image = (1-refl_strength) * base_color + refl_strength * refl_color
 

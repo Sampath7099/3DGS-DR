@@ -68,9 +68,57 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.init_refl_value = 1e-3
 
-        self.env_map = None
+        self.env_maps = None  # nn.ModuleList of K CubemapEncoders
         self.cluster_labels = None
+        self.num_env_clusters = 0
         self.setup_functions()
+
+    def re_cluster(self, k=None):
+        """Re-run K-Means clustering on current XYZ positions."""
+        from sklearn.cluster import KMeans
+        if k is None:
+            k = self.num_env_clusters
+        xyz_np = self._xyz.detach().cpu().numpy()
+        print(f"Re-clustering {len(xyz_np)} points into {k} clusters...")
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=20, max_iter=300)
+        labels = kmeans.fit_predict(xyz_np)
+        self.cluster_labels = torch.from_numpy(labels).to("cuda").long()
+        print(f"Re-clustering complete. Cluster sizes: {np.bincount(labels)}")
+
+    def split_env_maps(self, k, lr):
+        import copy
+        print(f"Splitting global map into {k} identical local copies...")
+        
+        # 1. Get the current global state
+        global_state = self.env_maps[0].state_dict()
+        
+        # 2. Remove the global map from the optimizer
+        old_params = []
+        new_param_groups = []
+        for group in self.optimizer.param_groups:
+            if group["name"] == "env_0":
+                old_params.extend(group["params"])
+            else:
+                new_param_groups.append(group)
+        self.optimizer.param_groups = new_param_groups
+        for p in old_params:
+            if p in self.optimizer.state:
+                del self.optimizer.state[p]
+                
+        # 3. Create K new maps and CLONE the global weights into each
+        new_maps = nn.ModuleList([CubemapEncoder(output_dim=3, resolution=128).cuda() for _ in range(k)])
+        for m in new_maps:
+            m.load_state_dict(global_state)
+            
+        self.env_maps = new_maps # Total K maps, global is gone
+        self.num_env_clusters = k
+        
+        # 4. Add all new maps to optimizer
+        for i, env_map in enumerate(self.env_maps):
+            self.optimizer.add_param_group({'params': env_map.parameters(), 'lr': lr, "name": f"env_{i}"})
+        
+        # 5. Spatial clustering
+        self.re_cluster()
 
     @property
     def get_cluster_colors(self):
@@ -156,8 +204,8 @@ class GaussianModel:
         return torch.cat((features_dc, features_rest), dim=1)
     
     @property
-    def get_envmap(self): # 
-        return self.env_map
+    def get_envmap(self):
+        return self.env_maps
     
     @property
     def get_refl_strength_to_total(self):
@@ -221,8 +269,9 @@ class GaussianModel:
             'opac': opacities, 'rot':rots, 'scale':scales, 'shs':features, 'refl':refl
         }
 
-    def create_from_pcd(self, pcd, spatial_lr_scale: float, cubemap_resol = 128):
+    def create_from_pcd(self, pcd, spatial_lr_scale: float, cubemap_resol = 128, num_clusters = 12):
         self.spatial_lr_scale = spatial_lr_scale
+        self.num_env_clusters = num_clusters
 
         pts = torch.tensor(np.asarray(pcd.points)).float().cuda()
         colors = torch.tensor(np.asarray(pcd.colors)).float().cuda()
@@ -242,8 +291,15 @@ class GaussianModel:
         self._features_dc = nn.Parameter(tot_props['shs'][:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(tot_props['shs'][:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         
-        env_map = CubemapEncoder(output_dim=3, resolution=cubemap_resol)
-        self.env_map = env_map.cuda()
+        # Per-cluster local env maps
+        from sklearn.cluster import KMeans
+        xyz_np = pts.detach().cpu().numpy()
+        print(f"Running K-Means clustering with k={num_clusters} on {len(xyz_np)} points...")
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=20, max_iter=300)
+        labels = kmeans.fit_predict(xyz_np)
+        self.cluster_labels = torch.from_numpy(labels).to("cuda").long()
+        print(f"Cluster sizes: {np.bincount(labels)}")
+        self.env_maps = nn.ModuleList([CubemapEncoder(output_dim=3, resolution=cubemap_resol) for _ in range(num_clusters)]).cuda()
 
         self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
 
@@ -260,8 +316,10 @@ class GaussianModel:
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-            {'params': self.env_map.parameters(), 'lr': training_args.envmap_cubemap_lr, "name": "env"}
         ]
+        # Add per-cluster env map optimizer groups
+        for i, env_map in enumerate(self.env_maps):
+            l.append({'params': env_map.parameters(), 'lr': training_args.envmap_cubemap_lr, "name": f"env_{i}"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         ###
@@ -316,9 +374,13 @@ class GaussianModel:
         PlyData([el]).write(path)
         ###
         #torch.save(self.mlp.state_dict(), path.replace('.ply', '.ckpt'))
-        if self.env_map is not None:
-            save_path = path.replace('.ply', '.map')
-            torch.save(self.env_map.state_dict(), save_path)
+        if self.env_maps is not None:
+            save_path = path.replace('.ply', '.maps')
+            torch.save({
+                'env_maps': self.env_maps.state_dict(),
+                'cluster_labels': self.cluster_labels.cpu() if self.cluster_labels is not None else None,
+                'num_env_clusters': self.num_env_clusters,
+            }, save_path)
                 
 
     def reset_opacity0(self):
@@ -382,8 +444,8 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
     def dist_color(self, exclusive_msk = None):
-        REFL_MSK_THR = 0.5
-        DIST_RANGE = 0.8
+        REFL_MSK_THR = 0.75
+        DIST_RANGE = 1
         refl_msk = self.get_refl.flatten() > REFL_MSK_THR
         if exclusive_msk is not None:
             refl_msk = torch.logical_or(refl_msk, exclusive_msk)
@@ -473,10 +535,19 @@ class GaussianModel:
         #mlp_path = path.replace('.ply', '.ckpt')
         #if os.path.exists(mlp_path):
         #    self.mlp.load_state_dict(torch.load(mlp_path))
-        map_path = path.replace('.ply', '.map')
-        if os.path.exists(map_path):
-            self.env_map = CubemapEncoder(output_dim=3, resolution=128).cuda()
-            self.env_map.load_state_dict(torch.load(map_path))
+        maps_path = path.replace('.ply', '.maps')
+        if os.path.exists(maps_path):
+            data = torch.load(maps_path, weights_only=False)
+            k = data.get('num_env_clusters', 0)
+            self.num_env_clusters = k
+            
+            num_actual_maps = len(set([int(k.split('.')[0]) for k in data['env_maps'].keys()]))
+            
+            self.env_maps = nn.ModuleList([CubemapEncoder(output_dim=3, resolution=128) for _ in range(num_actual_maps)]).cuda()
+            self.env_maps.load_state_dict(data['env_maps'])
+            if data['cluster_labels'] is not None:
+                self.cluster_labels = data['cluster_labels'].to("cuda").long()
+            print(f"Loaded {num_actual_maps} local env maps.")
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
@@ -505,7 +576,7 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] == "mlp" or group["name"] == "env": continue
+            if group["name"] == "mlp" or group["name"].startswith("env_"): continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -538,11 +609,14 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
+        if self.cluster_labels is not None:
+            self.cluster_labels = self.cluster_labels[valid_points_mask]
+
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] == "mlp" or group["name"] == "env": continue
-            assert len(group["params"]) == 1
+            if group["name"] == "mlp" or group["name"].startswith("env_"): continue
+            if len(group["params"]) != 1: continue
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -606,6 +680,11 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_refl, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
 
+        # Extend cluster_labels for split points (inherit parent label)
+        if self.cluster_labels is not None:
+            new_labels = self.cluster_labels[selected_pts_mask].repeat(N)
+            self.cluster_labels = torch.cat([self.cluster_labels, new_labels])
+
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
@@ -624,6 +703,11 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
         self.densification_postfix(new_xyz, new_refl, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+
+        # Extend cluster_labels for cloned points (inherit parent label)
+        if self.cluster_labels is not None:
+            new_labels = self.cluster_labels[selected_pts_mask]
+            self.cluster_labels = torch.cat([self.cluster_labels, new_labels])
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom

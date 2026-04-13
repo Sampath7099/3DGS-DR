@@ -55,7 +55,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         REFL_MSK_LOSS_W = 0.4
 
     gaussians = GaussianModel(dataset.sh_degree)
-    scene = Scene(dataset, gaussians) # init all parameters(pos,scale,rot...) from pcds
+    num_init_clusters = 1 if opt.local_env_from_iter > 0 else opt.num_env_clusters
+    scene = Scene(dataset, gaussians, num_clusters=num_init_clusters) # init all parameters(pos,scale,rot...) from pcds
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
@@ -101,7 +102,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration > FR_OPTIM_FROM_ITER and iteration % 1000 == 0:
             gaussians.oneupSHdegree()
         if iteration > INIT_UNITIL_ITER:
+            if initial_stage:
+                # Re-cluster on converged geometry
+                gaussians.re_cluster()
             initial_stage = False
+
+        if iteration == opt.local_env_from_iter and opt.num_env_clusters > 1 and len(gaussians.env_maps) == 1:
+            gaussians.split_env_maps(opt.num_env_clusters, opt.envmap_cubemap_lr * 0.1)
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -130,6 +137,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             refl_msk_loss = refls[get_outside_msk()].mean()
             loss += REFL_MSK_LOSS_W * refl_msk_loss
 
+        if not initial_stage and 'normal_map' in render_pkg:
+            from utils.loss_utils import bilateral_smooth_img_loss
+            reg_loss = bilateral_smooth_img_loss(render_pkg['normal_map'])
+            loss += opt.lambda_refl_smooth * reg_loss
+            
         loss.backward()
 
         iter_end.record()
