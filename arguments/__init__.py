@@ -74,11 +74,11 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.envmap_cubemap_lr = 0.05#0.05
+        self.envmap_cubemap_lr = 0.1#0.05
         self.percent_dense = 0.01
-        self.refl_init_value = 1e-3
-        self.lambda_dssim = 0.2
-        self.lambda_refl_smooth = 0.4
+        self.refl_init_value = 0.3
+        self.lambda_dssim = 0.4
+        self.lambda_refl_smooth = 2
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
@@ -88,9 +88,9 @@ class OptimizationParams(ParamGroup):
         self.prune_opacity_threshold = 0.005
 
         self.init_until_iter = 3000 #3000
-        self.feature_rest_from_iter = 10_000
-        self.normal_prop_until_iter = 24_000 #24_000
-        self.opac_lr0_interval = 200
+        self.feature_rest_from_iter = 60_000
+        self.normal_prop_until_iter = 55_000 #24_000
+        self.opac_lr0_interval = 100
         self.densification_interval_when_prop = 500
         self.longer_prop_iter = 0
 

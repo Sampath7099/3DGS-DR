@@ -382,8 +382,8 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
     def dist_color(self, exclusive_msk = None):
-        REFL_MSK_THR = 0.05
-        DIST_RANGE = 0.4
+        REFL_MSK_THR = 0.5
+        DIST_RANGE = 0.8
         refl_msk = self.get_refl.flatten() > REFL_MSK_THR
         if exclusive_msk is not None:
             refl_msk = torch.logical_or(refl_msk, exclusive_msk)
