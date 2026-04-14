@@ -104,13 +104,14 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--port", type=int, default=12357)
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    net.init('127.0.0.1', 12357)
+    net.init('127.0.0.1', args.port)
     render_network(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
 
     

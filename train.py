@@ -139,7 +139,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         if not initial_stage and 'normal_map' in render_pkg:
             from utils.loss_utils import bilateral_smooth_img_loss
-            reg_loss = bilateral_smooth_img_loss(render_pkg['normal_map'])
+            reg_loss = bilateral_smooth_img_loss(
+                render_pkg['normal_map'], 
+                render_pkg['refl_strength_map'],
+                render_pkg.get('cluster_map')
+            )
             loss += opt.lambda_refl_smooth * reg_loss
             
         loss.backward()

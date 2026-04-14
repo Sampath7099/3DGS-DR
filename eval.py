@@ -15,7 +15,7 @@ from utils.image_utils import psnr
 from utils.loss_utils import ssim
 from lpipsPyTorch import get_lpips_model
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background, save_ims):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, save_ims, args=None):
     if save_ims:
         render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
         #gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
@@ -63,7 +63,78 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     with open(dump_path, 'w') as f:
         f.write('psnr:{},ssim:{},lpips:{},fps:{}'.format(psnr_v, ssim_v, lpip_v, fps))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, save_ims : bool):
+    # --- AUTO LOG EXPERIMENT INTEGRATION ---
+    try:
+        import csv
+        import sys
+        from datetime import datetime
+        
+        # Try to extract hardcoded functions thresholds
+        hardcoded_params = {}
+        try:
+            sys.path.append(os.getcwd())
+            from log_experiment import extract_hyperparams
+            hardcoded_params = extract_hyperparams()
+        except: pass
+
+        row = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "model_path": model_path.split("/")[-1],
+            "psnr": float(psnr_v),
+            "ssim": float(ssim_v),
+            "lpips": float(lpip_v),
+            "fps": float(fps)
+        }
+        
+        # Start by integrating all raw/scraped parameters
+        row.update(hardcoded_params)
+        
+        # Integrate ALL arguments parsed locally as the absolute Ground Truth
+        if args is not None:
+             for k, v in vars(args).items():
+                 # Avoid saving massive paths or weird types if any
+                 if isinstance(v, (str, int, float, bool)):
+                     row[k] = v
+        
+        csv_file = "hyperparameter_experiments.csv"
+        file_exists = os.path.isfile(csv_file)
+        
+        existing_headers = []
+        old_rows = []
+        if file_exists:
+            with open(csv_file, 'r') as f:
+                reader = csv.DictReader(f)
+                existing_headers = reader.fieldnames if reader.fieldnames else []
+                old_rows = list(reader)
+                
+        # Merge headers
+        new_headers = [k for k in row.keys() if k not in existing_headers]
+        all_headers = existing_headers + new_headers
+        
+        # If there are new headers and the file existed, we MUST rewrite the whole file
+        # Otherwise Excel/CSV Viewers will only look at the old Row 1 and hide the new extra columns
+        if file_exists and new_headers:
+            with open(csv_file, "w", newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=all_headers)
+                writer.writeheader()
+                for old_row in old_rows:
+                    writer.writerow(old_row)
+                writer.writerow(row)
+        else:
+            with open(csv_file, "a", newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=all_headers)
+                if not file_exists or not existing_headers:
+                    writer.writeheader()
+                writer.writerow(row)
+            
+        print(f"\n==========================================")
+        print(f"Logged {len(row)} Parameters + Metrics to CSV!")
+        print(f"PSNR: {row['psnr']:.3f} | SSIM: {row['ssim']:.3f} | SH: {row.get('sh_degree', 'N/A')}")
+        print(f"==========================================")
+    except Exception as e:
+        print(f"Failed to auto-log experiment: {e}")
+
+def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, save_ims : bool, args=None):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
@@ -71,7 +142,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, save_ims)
+        render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, save_ims, args=args)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -87,4 +158,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.save_images)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.save_images, args=args)

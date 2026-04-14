@@ -65,15 +65,35 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 # im: 3,H,W, with grad
-def bilateral_smooth_img_loss(im: torch.Tensor):
+def bilateral_smooth_img_loss(im: torch.Tensor, refl_map: torch.Tensor, cluster_map: torch.Tensor = None):
     REFL_THRESH = 0.05
-    im = im.mean(dim = 0) # H,W
-    msk = im > REFL_THRESH
+    
+    # BIG BUG FIX: The original code averaged the X,Y,Z Normal vector and checked if it was > 0.05!
+    # This mathematically excluded the ENTIRE bottom hemisphere of all geometry from getting smoothed!
+    # We now properly use the actual reflection map.
+    msk = refl_map[0] > REFL_THRESH
     if not torch.any(msk): return 0
-    cim = im.detach().clone()
-    cim[~msk] = -999999.0 # make non refl area huge different with the refl area, so that the bilateral_blur won't blur pixel out of the refl area boundary
-    smoothed_im = bilateral_blur(cim[None,None], (11,11), 75/255, (10,10))[0,0]
-    loss = l2_loss(im[msk], smoothed_im[msk])
+    
+    cim = im.detach().clone() # 3, H, W
+    
+    # CLUSTER ISOLATION HACK:
+    # Kornia's bilateral_blur blends pixels if their color difference is within 75/255.
+    # By shifting each cluster's normal vector mathematical value up by a massive offset (100 * ID),
+    # the Bilateral filter sees clusters as infinitely different colors, and will violently 
+    # refuse to blur normal boundaries across different clusters!
+    if cluster_map is not None:
+        cim += (cluster_map * 100.0)
+
+    cim[:, ~msk] = -999999.0 
+    
+    # Blur the full 3xHxW geometry tensor
+    smoothed_im = bilateral_blur(cim[None], (11,11), 75/255, (10,10))[0]
+    
+    # Strip the offset out before comparing losses
+    if cluster_map is not None:
+        smoothed_im -= (cluster_map * 100.0)
+        
+    loss = l2_loss(im[:, msk], smoothed_im[:, msk])
     return loss
 
 # im: 3,H,W, with grad

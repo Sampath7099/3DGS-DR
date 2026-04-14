@@ -434,7 +434,7 @@ class GaussianModel:
         self._refl_strength = optimizable_tensors["refl"]
 
     def dist_rot(self): #
-        REFL_MSK_THR = 0.1
+        REFL_MSK_THR = 0.2
         refl_msk = self.get_refl.flatten() > REFL_MSK_THR
         rot = self.get_rotation.clone()
         dist_rot = self.rotation_activation(rot + torch.randn_like(rot)*0.08)
@@ -444,7 +444,7 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
     def dist_color(self, exclusive_msk = None):
-        REFL_MSK_THR = 0.75
+        REFL_MSK_THR = 0.5
         DIST_RANGE = 1
         refl_msk = self.get_refl.flatten() > REFL_MSK_THR
         if exclusive_msk is not None:
@@ -456,7 +456,7 @@ class GaussianModel:
         if "f_dc" not in optimizable_tensors: return
         self._features_dc = optimizable_tensors["f_dc"]
 
-    def enlarge_refl_scales(self, ret_raw = True, ENLARGE_SCALE=1.5, REFL_MSK_THR = 0.02, exclusive_msk = None):
+    def enlarge_refl_scales(self, ret_raw = True, ENLARGE_SCALE=1.5, REFL_MSK_THR = 0.09, exclusive_msk = None):
         refl_msk = self.get_refl.flatten() < REFL_MSK_THR
         if exclusive_msk is not None:
             refl_msk = torch.logical_or(refl_msk, exclusive_msk)
